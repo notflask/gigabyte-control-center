@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gigabyte-control-center"
+version = "0.1.0"
+description = "Keyboard backlight, fan and power mode control for Clevo-based Gigabyte laptops"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+gui = ["PySide6"]
+
+[project.scripts]
+gbcc = "gbcc.cli:main"
+gbccd = "gbcc.daemon:main"
+
+[project.gui-scripts]
+gbcc-gui = "gbcc.gui:main"
+
+[tool.setuptools]
+packages = ["gbcc"]
+
+[tool.setuptools.package-data]
+gbcc = ["data/*"]
