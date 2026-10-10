@@ -1,10 +1,12 @@
 """gbcc-gui: Qt window + tray icon. Talks to gbccd over its socket."""
 
+import html
 import os
 import sys
 
-from PySide6.QtCore import QPointF, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPen
+from PySide6.QtCore import QByteArray, QPointF, Qt, QTimer
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QColorDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMenu, QPushButton, QRadioButton, QSlider, QSpinBox, QSystemTrayIcon,
@@ -12,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from .client import ClientError, request
+from .daemon import curve_percent
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "data", "gbcc.svg")
 PROFILE_LABELS = {
@@ -57,13 +60,14 @@ class CurvePreview(QWidget):
         p.drawText(QPointF(0, 14), "%")
         if self.curve:
             pts = [pt(20, self.curve[0][1])] + [pt(t, c) for t, c in self.curve] + [pt(100, 100)]
-            p.setPen(QPen(QColor("#ff7a1a"), 2))
+            p.setPen(QPen(pal.highlight().color(), 2))
             for a, b in zip(pts, pts[1:]):
                 p.drawLine(a, b)
             for q in pts[1:-1]:
                 p.drawEllipse(q, 3, 3)
-        for temp, color in zip(self.temps, ("#4aa3ff", "#4fd17a")):
-            p.setPen(QPen(QColor(color), 1, Qt.DashLine))
+        # CPU in the theme's "visited link" color (matugen tertiary), GPU in placeholder gray
+        for temp, color in zip(self.temps, (pal.linkVisited().color(), pal.placeholderText().color())):
+            p.setPen(QPen(color, 1, Qt.DashLine))
             top, bottom = pt(temp, 100), pt(temp, 0)
             p.drawLine(top, bottom)
 
@@ -74,6 +78,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Gigabyte Control Center")
         self.setWindowIcon(QIcon(ICON_PATH))
         self.tray_available = tray_available
+        self.tray = None
+        self._tray_color = None
         self.status = None
         self.quitting = False
 
@@ -116,7 +122,7 @@ class MainWindow(QMainWindow):
         for c in PRESET_COLORS:
             b = QPushButton()
             b.setFixedSize(28, 28)
-            b.setStyleSheet(f"background:{c}; border:1px solid #555; border-radius:4px;")
+            b.setStyleSheet(f"background:{c}; border:1px solid palette(mid); border-radius:4px;")
             b.setToolTip(c)
             b.clicked.connect(lambda _=False, col=c: self.send("keyboard", color=col))
             presets.addWidget(b)
@@ -178,7 +184,7 @@ class MainWindow(QMainWindow):
         pts.addWidget(self.curve_apply, 0, CURVE_POINTS + 1, 2, 1)
         cl.addLayout(pts)
         hint = QLabel("Fans always go to 100% at 90 °C. Below 10% the fan stops; 10–19% becomes 20%.")
-        hint.setStyleSheet("color: gray;")
+        hint.setForegroundRole(QPalette.PlaceholderText)
         cl.addWidget(hint)
         fl.addWidget(self.curve_row)
         layout.addWidget(box)
@@ -199,7 +205,6 @@ class MainWindow(QMainWindow):
         self.battery_box.hide()
 
         self.error = QLabel()
-        self.error.setStyleSheet("color: #e05050;")
         self.error.setWordWrap(True)
         layout.addWidget(self.error)
         layout.addStretch()
@@ -217,7 +222,7 @@ class MainWindow(QMainWindow):
             self.error.clear()
         except ClientError as e:
             self.refresh(full=True)
-            self.error.setText(str(e))
+            self.error.setText(f"⚠ {e}")
 
     def refresh(self, full=False):
         try:
@@ -225,7 +230,9 @@ class MainWindow(QMainWindow):
             self.error.clear()
         except ClientError as e:
             self.readings.setText("<b>Not connected</b>")
-            self.error.setText(str(e))
+            if self.tray:
+                self.tray.setToolTip("<b>Gigabyte Control Center</b>\nNot connected to the service")
+            self.error.setText(f"⚠ {e}")
 
     def apply_status(self, st, full):
         # Settings changed elsewhere (CLI, tray): redraw the controls too
@@ -236,6 +243,7 @@ class MainWindow(QMainWindow):
         if st["battery"]:
             parts.append(f"<b>Battery</b> {st['battery']['capacity']}% {st['battery']['status'].lower()}")
         self.readings.setText("&nbsp;&nbsp;&nbsp;".join(parts))
+        self.update_tray()
         self.curve_preview.set_data(self.edited_curve() or s["fan"]["curve"], [f["temp"] for f in st["fans"]])
         if not full:
             return
@@ -250,7 +258,7 @@ class MainWindow(QMainWindow):
                 self.kbd_on.setChecked(kbd["brightness"] > 0)
                 if pct > 0:
                     self.kbd_slider.setValue(pct)
-            self.kbd_custom.setStyleSheet(f"border-left: 14px solid {kbd['color']};")
+            self.kbd_custom.setIcon(color_dot(kbd["color"]))
 
         fan = s["fan"]
         self.fan_buttons[fan["mode"]].setChecked(True)
@@ -273,8 +281,21 @@ class MainWindow(QMainWindow):
         if st["charge_limit"]:
             self.limit_spin.setValue(st["charge_limit"])
 
-        if self.tray_available:
-            update_tray_menu(self.status)
+
+    # --- tray ---
+
+    def update_tray(self):
+        if not self.tray or not self.status:
+            return
+        # Recolor the icon when the theme changes (matugen + KGlobalSettings.notifyChange)
+        color = self.palette().highlight().color().name()
+        if color != self._tray_color:
+            self._tray_color = color
+            self.tray.setIcon(themed_icon(self.palette()))
+        markup = tooltip_markup(self.status)
+        if markup != self.tray.toolTip():
+            self.tray.setToolTip(markup)
+        update_tray_menu(self.status)
 
     # --- keyboard handlers ---
 
@@ -338,9 +359,71 @@ class Blocked:
 
 _tray_actions = {}
 
+SPARK = " ▁▂▃▄▅▆▇█"
+
+
+def themed_icon(palette, size=64):
+    """App icon drawn in the theme's accent colors, so it follows the wallpaper."""
+    with open(ICON_PATH) as f:
+        svg = f.read()
+    svg = svg.replace("#1f2430", palette.highlight().color().name())
+    svg = svg.replace("#ff7a1a", palette.highlightedText().color().name())
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    QSvgRenderer(QByteArray(svg.encode())).render(p)
+    p.end()
+    return QIcon(pix)
+
+
+def color_dot(color, size=16):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(1, 1, size - 2, size - 2)
+    p.end()
+    return QIcon(pix)
+
+
+def tooltip_markup(st):
+    """Tray tooltip as Pango markup (Waybar renders the SNI tooltip title as markup)."""
+    s = st["settings"]
+    e = html.escape
+    lines = ["<b>Gigabyte Control Center</b>"]
+    lines.append(f"Mode: <b>{e(PROFILE_LABELS.get(s['profile'], 'firmware default'))}</b>")
+
+    kbd = st["keyboard"]
+    if kbd:
+        if kbd["brightness"] > 0:
+            pct = round(kbd["brightness"] * 100 / kbd["max_brightness"])
+            lines.append(f"Keyboard: <span foreground='{e(kbd['color'])}'>⬤</span> {e(kbd['color'])} · {pct}%")
+        else:
+            lines.append("Keyboard: off")
+
+    fan = s["fan"]
+    mode_label = dict(FAN_MODES)[fan["mode"]]
+    if fan["mode"] == "fixed":
+        mode_label += f" {fan['fixed']}%"
+    lines.append(f"Fans: <b>{e(mode_label)}</b>")
+    if fan["mode"] == "curve":
+        curve = fan["curve"]
+        spark = "".join(SPARK[round(curve_percent(curve, t) / 100 * 8)] for t in range(20, 101, 5))
+        lines.append(f"<tt>20° {spark} 100°</tt>")
+        lines.append("<small>" + e("  ".join(f"{t}°→{p}%" for t, p in curve)) + "</small>")
+
+    temps = "   ".join(f"{n} {f['temp']} °C · {f['duty']}%" for n, f in zip(("CPU", "GPU"), st["fans"]))
+    lines.append(e(temps))
+    if st["battery"]:
+        b = st["battery"]
+        lines.append(e(f"Battery {b['capacity']}% {b['status'].lower()}"))
+    return "\n".join(lines)
+
 
 def build_tray(app, window):
-    tray = QSystemTrayIcon(QIcon(ICON_PATH), app)
+    tray = QSystemTrayIcon(themed_icon(window.palette()), app)
     menu = QMenu()
     group = QActionGroup(menu)
     for name, label in PROFILE_LABELS.items():
@@ -362,7 +445,6 @@ def build_tray(app, window):
     quit_.triggered.connect(lambda: (setattr(window, "quitting", True), app.quit()))
     menu.addAction(quit_)
     tray.setContextMenu(menu)
-    tray.setToolTip("Gigabyte Control Center")
     tray.activated.connect(
         lambda reason: reason == QSystemTrayIcon.Trigger
         and (window.hide() if window.isVisible() else (window.show(), window.raise_())))
@@ -389,9 +471,8 @@ def main():
 
     window = MainWindow(tray_available)
     if tray_available:
-        window._tray = build_tray(app, window)
-        if window.status:
-            update_tray_menu(window.status)
+        window.tray = build_tray(app, window)
+        window.update_tray()
     if "--hidden" not in sys.argv or not tray_available:
         window.show()
     sys.exit(app.exec())

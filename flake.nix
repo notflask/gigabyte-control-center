@@ -11,7 +11,7 @@
     {
       packages.${system}.default = pkgs.callPackage ./nix/package.nix { };
 
-      nixosModules.default = import ./nix/module.nix self;
+      nixosModules.default = import ./nix/module.nix;
 
       devShells.${system}.default = pkgs.mkShell {
         packages = [ (pkgs.python3.withPackages (ps: [ ps.pyside6 ])) ];

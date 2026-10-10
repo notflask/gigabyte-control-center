@@ -24,7 +24,7 @@ python3Packages.buildPythonApplication {
     install -Dm644 gbcc/data/gbcc.svg $out/share/icons/hicolor/scalable/apps/gigabyte-control-center.svg
   '';
 
-  pythonImportsCheck = [ "gbcc.daemon" "gbcc.cli" ];
+  pythonImportsCheck = [ "gbcc.daemon" "gbcc.cli" "gbcc.gui" ];
 
   meta = {
     description = "Keyboard backlight, fan and power mode control for Clevo-based Gigabyte laptops";

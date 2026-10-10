@@ -35,6 +35,17 @@ and adds the tray icon to autostart. Options:
 
 Don't run TUXEDO Control Center or `tuxedo-rs` (tailord) at the same time; they would fight over the fans.
 
+## Tray and theming
+
+- Hover the tray icon to see the current mode, keyboard color, fan mode, the fan
+  curve as a small graph, temperatures and battery. Waybar renders it with formatting.
+- The app has no colors of its own: it uses your Qt platform theme. With
+  `QT_QPA_PLATFORMTHEME=kde` + Breeze + a matugen-generated `~/.config/kdeglobals`, the
+  window, the fan graph and the tray icon follow the wallpaper. They also update live
+  when `KGlobalSettings.notifyChange` is sent.
+- The NixOS module builds the app with your system's nixpkgs, so its Qt matches the
+  installed `plasma-integration` plugin.
+
 ## CLI
 
 ```

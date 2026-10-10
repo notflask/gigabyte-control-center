@@ -1,4 +1,3 @@
-self:
 { config, lib, pkgs, ... }:
 
 let
@@ -10,7 +9,11 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      # Built with the system's nixpkgs, so its Qt matches the system's Qt plugins
+      # (plasma-integration / Breeze). With a different Qt version the KDE platform
+      # theme can't load and the app falls back to the plain Fusion look.
+      default = pkgs.callPackage ./package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./nix/package.nix { }";
       description = "The gigabyte-control-center package.";
     };
 
