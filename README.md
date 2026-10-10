@@ -31,6 +31,7 @@ and adds the tray icon to autostart. Options:
 | Option | Default | |
 |---|---|---|
 | `services.gigabyte-control-center.group` | `"users"` | Who may change settings |
+| `services.gigabyte-control-center.profile` | `null` | Power mode at boot until you pick one (e.g. `"performance"`) |
 | `services.gigabyte-control-center.autostart` | `true` | Start the tray icon on login |
 
 Don't run TUXEDO Control Center or `tuxedo-rs` (tailord) at the same time; they would fight over the fans.

@@ -79,12 +79,15 @@ def curve_percent(curve, temp):
 
 
 class Daemon:
-    def __init__(self, hw, state_path=STATE_PATH):
+    def __init__(self, hw, state_path=STATE_PATH, default_profile=None):
         self.hw = hw
         self.state_path = state_path
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.state = self._load_state()
+        # Used until the user picks a mode; their choice is remembered after that
+        if self.state["profile"] is None and default_profile:
+            self.state["profile"] = default_profile
         self._applied = [None] * FAN_COUNT     # last duty we set per fan, for smoothing
         self._fan_manual = False
 
@@ -305,6 +308,8 @@ def main():
     ap.add_argument("--socket", default=SOCKET_PATH)
     ap.add_argument("--group", default="users", help="group allowed to use the socket")
     ap.add_argument("--state", default=STATE_PATH)
+    ap.add_argument("--default-profile", choices=PROFILES,
+                    help="power mode to apply at boot until one is chosen in the app")
     ap.add_argument("--fake", action="store_true", help="use simulated hardware (for testing)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -319,7 +324,7 @@ def main():
             raise SystemExit(f"gbccd: {e}")
         log.info("tuxedo_io %(module_version)s, interface %(interface)s", hw.info())
 
-    d = Daemon(hw, args.state)
+    d = Daemon(hw, args.state, args.default_profile)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: d.stop.set())
     d.apply_all()

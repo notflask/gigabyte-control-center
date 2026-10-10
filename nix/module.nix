@@ -23,6 +23,17 @@ in
       description = "Members of this group can change settings through the GUI and `gbcc`.";
     };
 
+    profile = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum [ "quiet" "power_saving" "entertainment" "performance" ]);
+      default = null;
+      example = "performance";
+      description = ''
+        Firmware power mode to start with. Used until you pick a mode in the app;
+        after that your choice is remembered across reboots. `null` leaves the
+        firmware default.
+      '';
+    };
+
     autostart = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -51,7 +62,8 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "systemd-modules-load.service" ];
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/gbccd --group ${cfg.group}";
+        ExecStart = "${cfg.package}/bin/gbccd --group ${cfg.group}"
+          + lib.optionalString (cfg.profile != null) " --default-profile ${cfg.profile}";
         Restart = "on-failure";
         RestartSec = 3;
         StateDirectory = "gigabyte-control-center";
