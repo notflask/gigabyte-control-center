@@ -1,22 +1,28 @@
-"""gbcc-gui: Qt window + tray icon. Talks to gbccd over its socket."""
+"""gbcc-gui: tray icon, quick popup and full window. Talks to gbccd over its socket.
+
+Colors come from the system Qt theme (palette); nothing here hard-codes them
+except the keyboard color presets and the app icon.
+"""
 
 import html
 import os
 import sys
+import time
 
-from PySide6.QtCore import QByteArray, QPointF, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPalette, QPen, QPixmap
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QColorDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMenu, QPushButton, QRadioButton, QSlider, QSpinBox, QSystemTrayIcon,
-    QVBoxLayout, QWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from .client import ClientError, request
 from .daemon import curve_percent
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "data", "gbcc.svg")
+POPUP_TITLE = "Gigabyte Control Center Quick"  # window rules match on this title
 PROFILE_LABELS = {
     "quiet": "Quiet",
     "power_saving": "Power saving",
@@ -24,18 +30,126 @@ PROFILE_LABELS = {
     "performance": "Performance",
 }
 PRESET_COLORS = ["#ff0000", "#ff6000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#8000ff", "#ff00ff", "#ffffff"]
-FAN_MODES = [("auto", "Auto (firmware)"), ("max", "Max"), ("fixed", "Fixed"), ("curve", "Custom curve")]
+FAN_MODES = [("auto", "Auto"), ("max", "Max"), ("fixed", "Fixed"), ("curve", "Curve")]
+FAN_MODE_LABELS = {"auto": "Auto (firmware)", "max": "Max", "fixed": "Fixed", "curve": "Custom curve"}
 CURVE_POINTS = 5
+SPARK = " ▁▂▃▄▅▆▇█"
+
+
+def app_icon():
+    return QIcon(ICON_PATH)
+
+
+def color_dot(color, size=16):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.NoPen)
+    p.drawEllipse(1, 1, size - 2, size - 2)
+    p.end()
+    return QIcon(pix)
+
+
+def readings_text(st):
+    return "   ".join(f"{n} {f['temp']} °C · {f['duty']}%" for n, f in zip(("CPU", "GPU"), st["fans"]))
+
+
+def tooltip_markup(st):
+    """Tray tooltip as Pango markup (Waybar renders the SNI tooltip title as markup)."""
+    s = st["settings"]
+    e = html.escape
+    lines = ["<b>Gigabyte Control Center</b>"]
+    lines.append(f"Mode: <b>{e(PROFILE_LABELS.get(s['profile'], 'firmware default'))}</b>")
+
+    kbd = st["keyboard"]
+    if kbd:
+        if kbd["brightness"] > 0:
+            pct = round(kbd["brightness"] * 100 / kbd["max_brightness"])
+            lines.append(f"Keyboard: <span foreground='{e(kbd['color'])}'>⬤</span> {e(kbd['color'])} · {pct}%")
+        else:
+            lines.append("Keyboard: off")
+
+    fan = s["fan"]
+    mode_label = FAN_MODE_LABELS[fan["mode"]]
+    if fan["mode"] == "fixed":
+        mode_label += f" {fan['fixed']}%"
+    lines.append(f"Fans: <b>{e(mode_label)}</b>")
+    if fan["mode"] == "curve":
+        curve = fan["curve"]
+        spark = "".join(SPARK[round(curve_percent(curve, t) / 100 * 8)] for t in range(20, 101, 5))
+        lines.append(f"<tt>20° {spark} 100°</tt>")
+        lines.append("<small>" + e("  ".join(f"{t}°→{p}%" for t, p in curve)) + "</small>")
+
+    lines.append(e(readings_text(st)))
+    if st["battery"]:
+        b = st["battery"]
+        lines.append(e(f"Battery {b['capacity']}% {b['status'].lower()}"))
+    return "\n".join(lines)
+
+
+class Blocked:
+    """Temporarily block widget signals while we update them from daemon state."""
+
+    def __init__(self, *widgets):
+        self.widgets = widgets
+
+    def __enter__(self):
+        for w in self.widgets:
+            w.blockSignals(True)
+
+    def __exit__(self, *_):
+        for w in self.widgets:
+            w.blockSignals(False)
+
+
+class Backend(QObject):
+    """Polls the daemon and sends commands; every view listens to its signals."""
+
+    # status dict, and whether the settings changed (controls need redrawing)
+    updated = Signal(object, bool)
+    failed = Signal(str)
+    disconnected = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.status = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(2000)
+
+    def _publish(self, st, force):
+        changed = force or self.status is None or st["settings"] != self.status["settings"]
+        self.status = st
+        self.updated.emit(st, changed)
+
+    def refresh(self, force=False):
+        try:
+            self._publish(request("status"), force)
+        except ClientError as e:
+            self.disconnected.emit(str(e))
+
+    def send(self, cmd, **params):
+        try:
+            self._publish(request(cmd, **params), True)
+        except ClientError as e:
+            self.refresh(force=True)
+            self.failed.emit(str(e))
+
+    def kbd_level(self, pct):
+        return round(pct * self.status["keyboard"]["max_brightness"] / 100)
 
 
 class CurvePreview(QWidget):
     """Draws the fan curve and marks the current CPU/GPU temperatures."""
 
-    def __init__(self):
+    def __init__(self, compact=False):
         super().__init__()
         self.curve = []
         self.temps = []
-        self.setMinimumHeight(120)
+        self.compact = compact
+        self.setMinimumHeight(64 if compact else 120)
 
     def set_data(self, curve, temps):
         self.curve, self.temps = curve, temps
@@ -44,50 +158,64 @@ class CurvePreview(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        w, h, m = self.width(), self.height(), 24
         pal = self.palette()
-        p.setPen(QPen(pal.mid().color(), 1))
-        p.drawRect(m, 4, w - m - 4, h - m - 4)
+        left = 4 if self.compact else 24
+        bottom = 4 if self.compact else 24
+        w, h = self.width(), self.height()
 
         def pt(temp, pct):
-            x = m + (temp - 20) / 80 * (w - m - 4)
-            y = 4 + (1 - pct / 100) * (h - m - 4)
+            x = left + (temp - 20) / 80 * (w - left - 4)
+            y = 4 + (1 - pct / 100) * (h - bottom - 8)
             return QPointF(x, y)
 
-        p.setPen(pal.text().color())
-        for t in (20, 40, 60, 80, 100):
-            p.drawText(pt(t, 0) + QPointF(-8 if t < 100 else -26, 16), f"{t}°")
-        p.drawText(QPointF(0, 14), "%")
+        p.setPen(QPen(pal.mid().color(), 1))
+        p.drawRoundedRect(QRectF(left, 4, w - left - 4, h - bottom - 8), 4, 4)
+        if not self.compact:
+            p.setPen(pal.text().color())
+            for t in (20, 40, 60, 80, 100):
+                p.drawText(pt(t, 0) + QPointF(-8 if t < 100 else -26, 16), f"{t}°")
+            p.drawText(QPointF(0, 14), "%")
         if self.curve:
             pts = [pt(20, self.curve[0][1])] + [pt(t, c) for t, c in self.curve] + [pt(100, 100)]
             p.setPen(QPen(pal.highlight().color(), 2))
             for a, b in zip(pts, pts[1:]):
                 p.drawLine(a, b)
-            for q in pts[1:-1]:
-                p.drawEllipse(q, 3, 3)
-        # CPU in the theme's "visited link" color (matugen tertiary), GPU in placeholder gray
+            if not self.compact:
+                for q in pts[1:-1]:
+                    p.drawEllipse(q, 3, 3)
+        # CPU in the theme's "visited link" color, GPU in placeholder gray
         for temp, color in zip(self.temps, (pal.linkVisited().color(), pal.placeholderText().color())):
             p.setPen(QPen(color, 1, Qt.DashLine))
-            top, bottom = pt(temp, 100), pt(temp, 0)
-            p.drawLine(top, bottom)
+            p.drawLine(pt(temp, 100), pt(temp, 0))
+
+
+def preset_row(backend, size):
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    for c in PRESET_COLORS:
+        b = QPushButton()
+        b.setFixedSize(size, size)
+        b.setStyleSheet(f"background:{c}; border:1px solid palette(mid); border-radius:{size // 2}px;")
+        b.setToolTip(c)
+        b.setCursor(Qt.PointingHandCursor)
+        b.clicked.connect(lambda _=False, col=c: backend.send("keyboard", color=col))
+        row.addWidget(b)
+    return row
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, tray_available):
+    def __init__(self, backend):
         super().__init__()
         self.setWindowTitle("Gigabyte Control Center")
-        self.setWindowIcon(QIcon(ICON_PATH))
-        self.tray_available = tray_available
-        self.tray = None
-        self._tray_color = None
-        self.status = None
+        self.setWindowIcon(app_icon())
+        self.backend = backend
         self.quitting = False
+        self.keep_running = False  # set when a tray icon keeps the app alive
 
         root = QWidget()
         layout = QVBoxLayout(root)
         self.setCentralWidget(root)
 
-        # --- live readings ---
         self.readings = QLabel("Connecting…")
         self.readings.setTextFormat(Qt.RichText)
         layout.addWidget(self.readings)
@@ -103,7 +231,7 @@ class MainWindow(QMainWindow):
             b.setMinimumHeight(40)
             self.profile_group.addButton(b)
             self.profile_buttons[name] = b
-            b.clicked.connect(lambda _=False, n=name: self.send("profile", name=n))
+            b.clicked.connect(lambda _=False, n=name: backend.send("profile", name=n))
             row.addWidget(b)
         layout.addWidget(box)
 
@@ -115,17 +243,11 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.kbd_on, 0, 0)
         self.kbd_slider = QSlider(Qt.Horizontal)
         self.kbd_slider.setRange(0, 100)
-        self.kbd_slider.sliderReleased.connect(self.on_kbd_brightness)
+        self.kbd_slider.sliderReleased.connect(
+            lambda: backend.send("keyboard", brightness=backend.kbd_level(self.kbd_slider.value())))
         grid.addWidget(QLabel("Brightness"), 0, 1)
         grid.addWidget(self.kbd_slider, 0, 2, 1, 2)
-        presets = QHBoxLayout()
-        for c in PRESET_COLORS:
-            b = QPushButton()
-            b.setFixedSize(28, 28)
-            b.setStyleSheet(f"background:{c}; border:1px solid palette(mid); border-radius:4px;")
-            b.setToolTip(c)
-            b.clicked.connect(lambda _=False, col=c: self.send("keyboard", color=col))
-            presets.addWidget(b)
+        presets = preset_row(backend, 28)
         self.kbd_custom = QPushButton("Custom…")
         self.kbd_custom.clicked.connect(self.on_kbd_custom)
         presets.addWidget(self.kbd_custom)
@@ -139,11 +261,11 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         self.fan_group = QButtonGroup(self)
         self.fan_buttons = {}
-        for mode, label in FAN_MODES:
-            b = QRadioButton(label)
+        for mode, _ in FAN_MODES:
+            b = QRadioButton(FAN_MODE_LABELS[mode])
             self.fan_group.addButton(b)
             self.fan_buttons[mode] = b
-            b.clicked.connect(lambda _=False, m=mode: self.send("fan", mode=m))
+            b.clicked.connect(lambda _=False, m=mode: backend.send("fan", mode=m))
             row.addWidget(b)
         fl.addLayout(row)
 
@@ -155,7 +277,7 @@ class MainWindow(QMainWindow):
         self.fixed_label = QLabel()
         self.fixed_slider.valueChanged.connect(lambda v: self.fixed_label.setText(f"{v}%"))
         self.fixed_slider.sliderReleased.connect(
-            lambda: self.send("fan", mode="fixed", fixed=self.fixed_slider.value()))
+            lambda: backend.send("fan", mode="fixed", fixed=self.fixed_slider.value()))
         r.addWidget(QLabel("Speed"))
         r.addWidget(self.fixed_slider)
         r.addWidget(self.fixed_label)
@@ -180,7 +302,7 @@ class MainWindow(QMainWindow):
             pts.addWidget(pc, 1, i + 1)
             self.curve_spins.append((t, pc))
         self.curve_apply = QPushButton("Apply curve")
-        self.curve_apply.clicked.connect(self.on_curve_apply)
+        self.curve_apply.clicked.connect(lambda: backend.send("fan", mode="curve", curve=self.edited_curve()))
         pts.addWidget(self.curve_apply, 0, CURVE_POINTS + 1, 2, 1)
         cl.addLayout(pts)
         hint = QLabel("Fans always go to 100% at 90 °C. Below 10% the fan stops; 10–19% becomes 20%.")
@@ -196,7 +318,7 @@ class MainWindow(QMainWindow):
         self.limit_spin.setRange(50, 100)
         self.limit_spin.setSuffix(" %")
         limit_apply = QPushButton("Set")
-        limit_apply.clicked.connect(lambda: self.send("charge_limit", percent=self.limit_spin.value()))
+        limit_apply.clicked.connect(lambda: backend.send("charge_limit", percent=self.limit_spin.value()))
         bl.addWidget(QLabel("Stop charging at"))
         bl.addWidget(self.limit_spin)
         bl.addWidget(limit_apply)
@@ -209,43 +331,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.error)
         layout.addStretch()
 
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(2000)
-        self.refresh(full=True)
+        self.curve_dirty = False
+        backend.updated.connect(self.apply_status)
+        backend.failed.connect(lambda msg: self.error.setText(f"⚠ {msg}"))
+        backend.disconnected.connect(self.on_disconnected)
 
-    # --- talking to the daemon ---
+    def on_disconnected(self, msg):
+        self.readings.setText("<b>Not connected</b>")
+        self.error.setText(f"⚠ {msg}")
 
-    def send(self, cmd, **params):
-        try:
-            self.apply_status(request(cmd, **params), full=True)
-            self.error.clear()
-        except ClientError as e:
-            self.refresh(full=True)
-            self.error.setText(f"⚠ {e}")
-
-    def refresh(self, full=False):
-        try:
-            self.apply_status(request("status"), full=full)
-            self.error.clear()
-        except ClientError as e:
-            self.readings.setText("<b>Not connected</b>")
-            if self.tray:
-                self.tray.setToolTip("<b>Gigabyte Control Center</b>\nNot connected to the service")
-            self.error.setText(f"⚠ {e}")
-
-    def apply_status(self, st, full):
-        # Settings changed elsewhere (CLI, tray): redraw the controls too
-        full = full or self.status is None or st["settings"] != self.status["settings"]
-        self.status = st
+    def apply_status(self, st, changed):
         s = st["settings"]
+        self.error.clear()
         parts = [f"<b>{n}</b> {f['temp']} °C · fan {f['duty']}%" for n, f in zip(("CPU", "GPU"), st["fans"])]
         if st["battery"]:
             parts.append(f"<b>Battery</b> {st['battery']['capacity']}% {st['battery']['status'].lower()}")
         self.readings.setText("&nbsp;&nbsp;&nbsp;".join(parts))
-        self.update_tray()
         self.curve_preview.set_data(self.edited_curve() or s["fan"]["curve"], [f["temp"] for f in st["fans"]])
-        if not full:
+        if not changed:
             return
 
         for name, b in self.profile_buttons.items():
@@ -281,200 +384,329 @@ class MainWindow(QMainWindow):
         if st["charge_limit"]:
             self.limit_spin.setValue(st["charge_limit"])
 
-
-    # --- tray ---
-
-    def update_tray(self):
-        if not self.tray or not self.status:
-            return
-        # Recolor the icon when the theme changes (matugen + KGlobalSettings.notifyChange)
-        color = self.palette().highlight().color().name()
-        if color != self._tray_color:
-            self._tray_color = color
-            self.tray.setIcon(themed_icon(self.palette()))
-        markup = tooltip_markup(self.status)
-        if markup != self.tray.toolTip():
-            self.tray.setToolTip(markup)
-        update_tray_menu(self.status)
-
-    # --- keyboard handlers ---
-
-    def kbd_level(self, pct):
-        return round(pct * self.status["keyboard"]["max_brightness"] / 100)
-
     def on_kbd_toggled(self, on):
         pct = max(self.kbd_slider.value(), 10) if on else 0
-        self.send("keyboard", brightness=self.kbd_level(pct))
-
-    def on_kbd_brightness(self):
-        self.send("keyboard", brightness=self.kbd_level(self.kbd_slider.value()))
+        self.backend.send("keyboard", brightness=self.backend.kbd_level(pct))
 
     def on_kbd_custom(self):
-        start = QColor(self.status["keyboard"]["color"]) if self.status and self.status["keyboard"] else Qt.white
+        st = self.backend.status
+        start = QColor(st["keyboard"]["color"]) if st and st["keyboard"] else QColor("white")
         c = QColorDialog.getColor(start, self, "Keyboard color")
         if c.isValid():
-            self.send("keyboard", color=c.name())
-
-    # --- curve handlers ---
+            self.backend.send("keyboard", color=c.name())
 
     def edited_curve(self):
-        if not getattr(self, "curve_dirty", False):
+        if not self.curve_dirty:
             return None
-        pts = sorted({(t.value(), pc.value()) for t, pc in self.curve_spins})
-        return [list(p) for p in pts]
+        return [list(p) for p in sorted({(t.value(), pc.value()) for t, pc in self.curve_spins})]
 
     def on_curve_edited(self):
         self.curve_dirty = True
         self.curve_apply.setEnabled(True)
-        if self.status:
-            self.curve_preview.set_data(self.edited_curve(), [f["temp"] for f in self.status["fans"]])
+        if self.backend.status:
+            self.curve_preview.set_data(self.edited_curve(), [f["temp"] for f in self.backend.status["fans"]])
 
-    def on_curve_apply(self):
-        self.send("fan", mode="curve", curve=self.edited_curve())
-
-    # --- window behaviour ---
+    def open(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def closeEvent(self, event):
-        if self.tray_available and not self.quitting:
+        if self.keep_running and not self.quitting:
             event.ignore()
             self.hide()
         else:
             event.accept()
 
 
-class Blocked:
-    """Temporarily block widget signals while we update them from daemon state."""
+class QuickPopup(QWidget):
+    """Compact panel opened from the tray icon. Works on any desktop: on X11 it
+    opens next to the pointer; on Wayland the compositor places it (window rules
+    can match the title POPUP_TITLE)."""
 
-    def __init__(self, *widgets):
-        self.widgets = widgets
+    def __init__(self, backend, open_full):
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowTitle(POPUP_TITLE)
+        self.setWindowIcon(app_icon())
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(340)
+        self.backend = backend
+        self.hidden_at = 0.0
 
-    def __enter__(self):
-        for w in self.widgets:
-            w.blockSignals(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
 
-    def __exit__(self, *_):
-        for w in self.widgets:
-            w.blockSignals(False)
+        # header
+        head = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(app_icon().pixmap(28, 28))
+        title = QLabel("<b>Control Center</b>")
+        more = QToolButton()
+        more.setIcon(QIcon.fromTheme("configure", QIcon.fromTheme("preferences-system")))
+        if more.icon().isNull():
+            more.setText("⚙")
+        more.setToolTip("Open full window")
+        more.setAutoRaise(True)
+        more.clicked.connect(lambda: (self.hide(), open_full()))
+        head.addWidget(logo)
+        head.addWidget(title)
+        head.addStretch()
+        head.addWidget(more)
+        layout.addLayout(head)
 
+        self.readings = QLabel("Connecting…")
+        self.readings.setForegroundRole(QPalette.PlaceholderText)
+        layout.addWidget(self.readings)
 
-_tray_actions = {}
+        # power mode, 2 × 2
+        layout.addWidget(self.section("Power mode"))
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        self.profile_buttons = {}
+        group = QButtonGroup(self)
+        for i, (name, label) in enumerate(PROFILE_LABELS.items()):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setMinimumHeight(34)
+            group.addButton(b)
+            b.clicked.connect(lambda _=False, n=name: backend.send("profile", name=n))
+            grid.addWidget(b, i // 2, i % 2)
+            self.profile_buttons[name] = b
+        layout.addLayout(grid)
 
-SPARK = " ▁▂▃▄▅▆▇█"
+        # keyboard
+        layout.addWidget(self.section("Keyboard"))
+        row = QHBoxLayout()
+        self.kbd_on = QCheckBox("On")
+        self.kbd_on.toggled.connect(self.on_kbd_toggled)
+        self.kbd_slider = QSlider(Qt.Horizontal)
+        self.kbd_slider.setRange(0, 100)
+        self.kbd_slider.sliderReleased.connect(
+            lambda: backend.send("keyboard", brightness=backend.kbd_level(self.kbd_slider.value())))
+        row.addWidget(self.kbd_on)
+        row.addWidget(self.kbd_slider)
+        layout.addLayout(row)
+        presets = preset_row(backend, 22)
+        presets.addStretch()
+        layout.addLayout(presets)
 
+        # fans
+        layout.addWidget(self.section("Fans"))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.fan_buttons = {}
+        group = QButtonGroup(self)
+        for mode, label in FAN_MODES:
+            b = QPushButton(label)
+            b.setCheckable(True)
+            group.addButton(b)
+            b.clicked.connect(lambda _=False, m=mode: backend.send("fan", mode=m))
+            row.addWidget(b)
+            self.fan_buttons[mode] = b
+        layout.addLayout(row)
+        self.fixed_slider = QSlider(Qt.Horizontal)
+        self.fixed_slider.setRange(0, 100)
+        self.fixed_slider.sliderReleased.connect(
+            lambda: backend.send("fan", mode="fixed", fixed=self.fixed_slider.value()))
+        layout.addWidget(self.fixed_slider)
+        self.curve = CurvePreview(compact=True)
+        layout.addWidget(self.curve)
 
-def themed_icon(palette, size=64):
-    """App icon drawn in the theme's accent colors, so it follows the wallpaper."""
-    with open(ICON_PATH) as f:
-        svg = f.read()
-    svg = svg.replace("#1f2430", palette.highlight().color().name())
-    svg = svg.replace("#ff7a1a", palette.highlightedText().color().name())
-    pix = QPixmap(size, size)
-    pix.fill(Qt.transparent)
-    p = QPainter(pix)
-    QSvgRenderer(QByteArray(svg.encode())).render(p)
-    p.end()
-    return QIcon(pix)
+        self.footer = QLabel()
+        self.footer.setForegroundRole(QPalette.PlaceholderText)
+        self.footer.setWordWrap(True)
+        layout.addWidget(self.footer)
 
+        backend.updated.connect(self.apply_status)
+        backend.failed.connect(lambda msg: self.footer.setText(f"⚠ {msg}"))
+        backend.disconnected.connect(lambda msg: (self.readings.setText("Not connected"), self.footer.setText(f"⚠ {msg}")))
 
-def color_dot(color, size=16):
-    pix = QPixmap(size, size)
-    pix.fill(Qt.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor(color))
-    p.setPen(Qt.NoPen)
-    p.drawEllipse(1, 1, size - 2, size - 2)
-    p.end()
-    return QIcon(pix)
+    @staticmethod
+    def section(text):
+        label = QLabel(text.upper())
+        font = label.font()
+        font.setPointSizeF(font.pointSizeF() * 0.8)
+        font.setBold(True)
+        label.setFont(font)
+        label.setForegroundRole(QPalette.PlaceholderText)
+        return label
 
-
-def tooltip_markup(st):
-    """Tray tooltip as Pango markup (Waybar renders the SNI tooltip title as markup)."""
-    s = st["settings"]
-    e = html.escape
-    lines = ["<b>Gigabyte Control Center</b>"]
-    lines.append(f"Mode: <b>{e(PROFILE_LABELS.get(s['profile'], 'firmware default'))}</b>")
-
-    kbd = st["keyboard"]
-    if kbd:
-        if kbd["brightness"] > 0:
-            pct = round(kbd["brightness"] * 100 / kbd["max_brightness"])
-            lines.append(f"Keyboard: <span foreground='{e(kbd['color'])}'>⬤</span> {e(kbd['color'])} · {pct}%")
-        else:
-            lines.append("Keyboard: off")
-
-    fan = s["fan"]
-    mode_label = dict(FAN_MODES)[fan["mode"]]
-    if fan["mode"] == "fixed":
-        mode_label += f" {fan['fixed']}%"
-    lines.append(f"Fans: <b>{e(mode_label)}</b>")
-    if fan["mode"] == "curve":
-        curve = fan["curve"]
-        spark = "".join(SPARK[round(curve_percent(curve, t) / 100 * 8)] for t in range(20, 101, 5))
-        lines.append(f"<tt>20° {spark} 100°</tt>")
-        lines.append("<small>" + e("  ".join(f"{t}°→{p}%" for t, p in curve)) + "</small>")
-
-    temps = "   ".join(f"{n} {f['temp']} °C · {f['duty']}%" for n, f in zip(("CPU", "GPU"), st["fans"]))
-    lines.append(e(temps))
-    if st["battery"]:
+    def apply_status(self, st, changed):
+        s = st["settings"]
+        self.readings.setText(readings_text(st))
+        self.curve.set_data(s["fan"]["curve"], [f["temp"] for f in st["fans"]])
         b = st["battery"]
-        lines.append(e(f"Battery {b['capacity']}% {b['status'].lower()}"))
-    return "\n".join(lines)
+        self.footer.setText(f"Battery {b['capacity']}% · {b['status'].lower()}" if b else "")
+        if not changed:
+            return
+        for name, btn in self.profile_buttons.items():
+            btn.setChecked(name == s["profile"])
+        kbd = st["keyboard"]
+        if kbd:
+            pct = round(kbd["brightness"] * 100 / kbd["max_brightness"])
+            with Blocked(self.kbd_on, self.kbd_slider):
+                self.kbd_on.setChecked(kbd["brightness"] > 0)
+                if pct > 0:
+                    self.kbd_slider.setValue(pct)
+        fan = s["fan"]
+        self.fan_buttons[fan["mode"]].setChecked(True)
+        self.fixed_slider.setVisible(fan["mode"] == "fixed")
+        self.curve.setVisible(fan["mode"] == "curve")
+        with Blocked(self.fixed_slider):
+            self.fixed_slider.setValue(fan["fixed"])
+        self.adjustSize()
+
+    def on_kbd_toggled(self, on):
+        pct = max(self.kbd_slider.value(), 10) if on else 0
+        self.backend.send("keyboard", brightness=self.backend.kbd_level(pct))
+
+    # --- show / hide ---
+
+    def toggle(self):
+        # A click on the tray icon first takes focus away, which already hid us
+        if self.isVisible() or time.monotonic() - self.hidden_at < 0.3:
+            self.hide()
+            return
+        self.backend.refresh(force=True)
+        self.adjustSize()
+        if QGuiApplication.platformName() == "xcb":
+            self.move(self.position_near(QCursor.pos()))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def position_near(self, pos):
+        screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = min(max(pos.x() - self.width() // 2, area.left() + 8), area.right() - self.width() - 8)
+        y = pos.y() + 16 if pos.y() < area.center().y() else pos.y() - self.height() - 16
+        y = min(max(y, area.top() + 8), area.bottom() - self.height() - 8)
+        return QPoint(x, y)
+
+    def changeEvent(self, event):
+        if event.type() == event.Type.ActivationChange and not self.isActiveWindow() and self.isVisible():
+            self.hide()
+        super().changeEvent(event)
+
+    def hideEvent(self, event):
+        self.hidden_at = time.monotonic()
+        super().hideEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+        else:
+            super().keyPressEvent(event)
+
+    def paintEvent(self, _):
+        # Rounded panel in the theme's window color
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pal = self.palette()
+        p.setBrush(pal.window())
+        p.setPen(QPen(pal.mid().color(), 1))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 14, 14)
 
 
-def build_tray(app, window):
-    tray = QSystemTrayIcon(themed_icon(window.palette()), app)
-    menu = QMenu()
-    group = QActionGroup(menu)
-    for name, label in PROFILE_LABELS.items():
-        a = QAction(label, menu, checkable=True)
-        a.triggered.connect(lambda _=False, n=name: window.send("profile", name=n))
-        group.addAction(a)
-        menu.addAction(a)
-        _tray_actions[name] = a
-    menu.addSeparator()
-    kbd = QAction("Keyboard light", menu, checkable=True)
-    kbd.triggered.connect(window.kbd_on.setChecked)
-    menu.addAction(kbd)
-    _tray_actions["kbd"] = kbd
-    menu.addSeparator()
-    show = QAction("Open", menu)
-    show.triggered.connect(lambda: (window.show(), window.raise_(), window.activateWindow()))
-    menu.addAction(show)
-    quit_ = QAction("Quit", menu)
-    quit_.triggered.connect(lambda: (setattr(window, "quitting", True), app.quit()))
-    menu.addAction(quit_)
-    tray.setContextMenu(menu)
-    tray.activated.connect(
-        lambda reason: reason == QSystemTrayIcon.Trigger
-        and (window.hide() if window.isVisible() else (window.show(), window.raise_())))
-    tray.show()
-    return tray
+class Tray(QSystemTrayIcon):
+    def __init__(self, app, backend, window, popup):
+        super().__init__(app_icon(), app)
+        self.backend = backend
+        menu = QMenu()
+        group = QActionGroup(menu)
+        self.profile_actions = {}
+        for name, label in PROFILE_LABELS.items():
+            a = QAction(label, menu, checkable=True)
+            a.triggered.connect(lambda _=False, n=name: backend.send("profile", name=n))
+            group.addAction(a)
+            menu.addAction(a)
+            self.profile_actions[name] = a
+        menu.addSeparator()
+        self.kbd_action = QAction("Keyboard light", menu, checkable=True)
+        self.kbd_action.triggered.connect(self.on_kbd)
+        menu.addAction(self.kbd_action)
+        menu.addSeparator()
+        menu.addAction("Open", window.open)
+        menu.addAction("Quit", lambda: (setattr(window, "quitting", True), app.quit()))
+        self.setContextMenu(menu)
+        self.activated.connect(
+            lambda reason: reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) and popup.toggle())
+        backend.updated.connect(self.apply_status)
+        backend.disconnected.connect(
+            lambda _: self.setToolTip("<b>Gigabyte Control Center</b>\nNot connected to the service"))
+
+    def on_kbd(self, on):
+        st = self.backend.status
+        if st and st["keyboard"]:
+            self.backend.send("keyboard", brightness=st["keyboard"]["max_brightness"] if on else 0)
+
+    def apply_status(self, st, _changed):
+        markup = tooltip_markup(st)
+        if markup != self.toolTip():
+            self.setToolTip(markup)
+        for name, a in self.profile_actions.items():
+            a.setChecked(name == st["settings"]["profile"])
+        if st["keyboard"]:
+            self.kbd_action.setChecked(st["keyboard"]["brightness"] > 0)
 
 
-def update_tray_menu(st):
-    if not _tray_actions:
-        return
-    for name in PROFILE_LABELS:
-        _tray_actions[name].setChecked(name == st["settings"]["profile"])
-    if st["keyboard"]:
-        _tray_actions["kbd"].setChecked(st["keyboard"]["brightness"] > 0)
+def instance_name():
+    return f"gigabyte-control-center-{os.getuid()}"
+
+
+def forward_to_running_instance(command):
+    """If the app already runs, hand it the command (show / popup) and return True."""
+    sock = QLocalSocket()
+    sock.connectToServer(instance_name())
+    if not sock.waitForConnected(300):
+        return False
+    sock.write(command.encode())
+    sock.waitForBytesWritten(300)
+    sock.disconnectFromServer()
+    return True
 
 
 def main():
+    args = sys.argv[1:]
     app = QApplication(sys.argv)
     app.setApplicationName("Gigabyte Control Center")
     app.setDesktopFileName("gigabyte-control-center")
-    app.setWindowIcon(QIcon(ICON_PATH))
-    tray_available = QSystemTrayIcon.isSystemTrayAvailable()
-    app.setQuitOnLastWindowClosed(not tray_available)
+    app.setWindowIcon(app_icon())
 
-    window = MainWindow(tray_available)
-    if tray_available:
-        window.tray = build_tray(app, window)
-        window.update_tray()
-    if "--hidden" not in sys.argv or not tray_available:
-        window.show()
+    command = "popup" if "--popup" in args else ("tray" if "--hidden" in args else "show")
+    if forward_to_running_instance(command):
+        return
+
+    backend = Backend()
+    window = MainWindow(backend)
+    popup = QuickPopup(backend, window.open)
+    tray = None
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        tray = Tray(app, backend, window, popup)
+        tray.show()
+        window.keep_running = True
+        app.setQuitOnLastWindowClosed(False)
+
+    def handle(cmd):
+        if cmd == "popup":
+            popup.toggle()
+        elif cmd == "show" or not tray:
+            window.open()
+
+    server = QLocalServer()
+    QLocalServer.removeServer(instance_name())
+    server.listen(instance_name())
+
+    def on_connection():
+        conn = server.nextPendingConnection()
+        conn.waitForReadyRead(300)
+        handle(bytes(conn.readAll()).decode(errors="ignore"))
+        conn.deleteLater()
+
+    server.newConnection.connect(on_connection)
+    backend.refresh(force=True)
+    handle(command)
     sys.exit(app.exec())
 
 

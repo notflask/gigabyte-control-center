@@ -37,6 +37,13 @@ Don't run TUXEDO Control Center or `tuxedo-rs` (tailord) at the same time; they 
 
 ## Tray and theming
 
+- Click the tray icon for the quick popup: power mode, keyboard light and color, fan
+  mode and curve, temperatures. The gear button opens the full window. It works on
+  any desktop with a tray. On X11 it opens next to the pointer; on Wayland the
+  compositor places it, and window rules can match its title
+  `Gigabyte Control Center Quick`.
+- `gbcc-gui --popup` toggles the popup of the running app (bind it to a key), and
+  `gbcc-gui` opens the full window. Only one instance runs.
 - Hover the tray icon to see the current mode, keyboard color, fan mode, the fan
   curve as a small graph, temperatures and battery. Waybar renders it with formatting.
 - The app has no colors of its own: it uses your Qt platform theme. With
