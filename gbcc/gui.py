@@ -10,7 +10,7 @@ import sys
 import time
 
 from PySide6.QtCore import QByteArray, QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -68,6 +68,41 @@ def color_dot(color, size=16):
     return QIcon(pix)
 
 
+class BrandTitle(QWidget):
+    """"GIGABYTE" wide-spaced in the theme accent, then "Control Center" light."""
+
+    def __init__(self, scale=1.0):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(round(7 * scale))
+        base = self.font().pointSizeF()
+
+        brand = QLabel("GIGABYTE")
+        f = QFont(self.font())
+        f.setPointSizeF(base * 1.05 * scale)
+        f.setWeight(QFont.Black)
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 2.6 * scale)
+        brand.setFont(f)
+        brand.setForegroundRole(QPalette.Highlight)
+
+        name = QLabel("Control Center")
+        f = QFont(self.font())
+        f.setPointSizeF(base * 1.05 * scale)
+        f.setWeight(QFont.Light)
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 0.4 * scale)
+        name.setFont(f)
+
+        row.addWidget(brand, 0, Qt.AlignBaseline)
+        row.addWidget(name, 0, Qt.AlignBaseline)
+        row.addStretch()
+
+
+# Pango markup for the tray tooltip (letter_spacing is in 1/1024 pt)
+TOOLTIP_TITLE = ("<span weight='heavy' letter_spacing='2048'>GIGABYTE</span> "
+                 "<span weight='light'>Control Center</span>")
+
+
 def readings_text(st):
     return "   ".join(f"{n} {f['temp']} °C · {f['duty']}%" for n, f in zip(("CPU", "GPU"), st["fans"]))
 
@@ -76,7 +111,7 @@ def tooltip_markup(st):
     """Tray tooltip as Pango markup (Waybar renders the SNI tooltip title as markup)."""
     s = st["settings"]
     e = html.escape
-    lines = ["<b>Gigabyte Control Center</b>"]
+    lines = [TOOLTIP_TITLE]
     lines.append(f"Mode: <b>{e(PROFILE_LABELS.get(s['profile'], 'firmware default'))}</b>")
 
     kbd = st["keyboard"]
@@ -232,8 +267,17 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
         self.setCentralWidget(root)
 
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        self.logo = QLabel()
+        self.logo.setPixmap(app_icon().pixmap(32, 32))
+        head.addWidget(self.logo)
+        head.addWidget(BrandTitle(scale=1.5))
+        layout.addLayout(head)
+
         self.readings = QLabel("Connecting…")
         self.readings.setTextFormat(Qt.RichText)
+        self.readings.setForegroundRole(QPalette.PlaceholderText)
         layout.addWidget(self.readings)
 
         # --- power mode ---
@@ -457,7 +501,7 @@ class QuickPopup(QWidget):
         head = QHBoxLayout()
         self.logo = logo = QLabel()
         logo.setPixmap(app_icon().pixmap(22, 22))
-        title = QLabel("<b>Control Center</b>")
+        title = BrandTitle()
         more = QToolButton()
         more.setIcon(QIcon.fromTheme("configure", QIcon.fromTheme("preferences-system")))
         if more.icon().isNull():
@@ -631,6 +675,7 @@ class Tray(QSystemTrayIcon):
         self.backend = backend
         self.app = app
         self.popup = popup
+        self.window = window
         self.icon_color = QApplication.palette().windowText().color().name()
         menu = QMenu()
         group = QActionGroup(menu)
@@ -653,7 +698,7 @@ class Tray(QSystemTrayIcon):
             lambda reason: reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) and popup.toggle())
         backend.updated.connect(self.apply_status)
         backend.disconnected.connect(
-            lambda _: self.setToolTip("<b>Gigabyte Control Center</b>\nNot connected to the service"))
+            lambda _: self.setToolTip(TOOLTIP_TITLE + "\nNot connected to the service"))
 
     def on_kbd(self, on):
         st = self.backend.status
@@ -669,6 +714,7 @@ class Tray(QSystemTrayIcon):
             self.setIcon(icon)
             self.app.setWindowIcon(icon)
             self.popup.logo.setPixmap(icon.pixmap(22, 22))
+            self.window.logo.setPixmap(icon.pixmap(32, 32))
         markup = tooltip_markup(st)
         if markup != self.toolTip():
             self.setToolTip(markup)
