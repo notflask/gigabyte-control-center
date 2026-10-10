@@ -9,9 +9,10 @@ import os
 import sys
 import time
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QColorDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMenu, QPushButton, QRadioButton, QSlider, QSpinBox, QSystemTrayIcon,
@@ -36,8 +37,23 @@ CURVE_POINTS = 5
 SPARK = " ▁▂▃▄▅▆▇█"
 
 
-def app_icon():
-    return QIcon(ICON_PATH)
+def app_icon(color=None):
+    """The fan icon in one color: by default the theme's text color, so it fits
+    light and dark panels the way symbolic tray icons do."""
+    if color is None:
+        color = QApplication.palette().windowText().color().name()
+    with open(ICON_PATH) as f:
+        svg = QByteArray(f.read().replace("#000000", color).encode())
+    renderer = QSvgRenderer(svg)
+    icon = QIcon()
+    for size in (16, 22, 24, 32, 48, 64, 128, 256):
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        renderer.render(p)
+        p.end()
+        icon.addPixmap(pix)
+    return icon
 
 
 def color_dot(color, size=16):
@@ -439,8 +455,8 @@ class QuickPopup(QWidget):
 
         # header
         head = QHBoxLayout()
-        logo = QLabel()
-        logo.setPixmap(app_icon().pixmap(28, 28))
+        self.logo = logo = QLabel()
+        logo.setPixmap(app_icon().pixmap(22, 22))
         title = QLabel("<b>Control Center</b>")
         more = QToolButton()
         more.setIcon(QIcon.fromTheme("configure", QIcon.fromTheme("preferences-system")))
@@ -613,6 +629,9 @@ class Tray(QSystemTrayIcon):
     def __init__(self, app, backend, window, popup):
         super().__init__(app_icon(), app)
         self.backend = backend
+        self.app = app
+        self.popup = popup
+        self.icon_color = QApplication.palette().windowText().color().name()
         menu = QMenu()
         group = QActionGroup(menu)
         self.profile_actions = {}
@@ -642,6 +661,14 @@ class Tray(QSystemTrayIcon):
             self.backend.send("keyboard", brightness=st["keyboard"]["max_brightness"] if on else 0)
 
     def apply_status(self, st, _changed):
+        # Light/dark switch (matugen + KGlobalSettings.notifyChange): recolor the fan
+        color = QApplication.palette().windowText().color().name()
+        if color != self.icon_color:
+            self.icon_color = color
+            icon = app_icon(color)
+            self.setIcon(icon)
+            self.app.setWindowIcon(icon)
+            self.popup.logo.setPixmap(icon.pixmap(22, 22))
         markup = tooltip_markup(st)
         if markup != self.toolTip():
             self.setToolTip(markup)

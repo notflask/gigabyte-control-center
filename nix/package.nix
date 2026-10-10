@@ -21,7 +21,11 @@ python3Packages.buildPythonApplication {
 
   postInstall = ''
     install -Dm644 gigabyte-control-center.desktop -t $out/share/applications
-    install -Dm644 gbcc/data/gbcc.svg $out/share/icons/hicolor/scalable/apps/gigabyte-control-center.svg
+    # Launcher icon: the fan in a gray that works on light and dark menus;
+    # symbolic variant for desktops that recolor icons themselves
+    mkdir -p $out/share/icons/hicolor/scalable/apps $out/share/icons/hicolor/symbolic/apps
+    sed 's/#000000/#8e939e/' gbcc/data/gbcc.svg > $out/share/icons/hicolor/scalable/apps/gigabyte-control-center.svg
+    sed 's/#000000/#2e3436/' gbcc/data/gbcc.svg > $out/share/icons/hicolor/symbolic/apps/gigabyte-control-center-symbolic.svg
   '';
 
   pythonImportsCheck = [ "gbcc.daemon" "gbcc.cli" "gbcc.gui" ];

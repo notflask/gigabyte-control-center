@@ -1,86 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 128 128">
+  <!-- One-color fan. #000000 is replaced at runtime with the theme text color. -->
   <defs>
-    <!-- base: deep violet to electric blue to aqua -->
-    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
-      <stop offset="0" stop-color="#7a4dff"/>
-      <stop offset="0.5" stop-color="#3a6bff"/>
-      <stop offset="1" stop-color="#19c9e6"/>
-    </linearGradient>
-    <!-- warm glow bottom-left, cool glow top-right -->
-    <radialGradient id="glowPink" cx="0.15" cy="0.95" r="0.7">
-      <stop offset="0" stop-color="#ff5fd2" stop-opacity="0.85"/>
-      <stop offset="1" stop-color="#ff5fd2" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="glowCyan" cx="0.95" cy="0.05" r="0.6">
-      <stop offset="0" stop-color="#9ff6ff" stop-opacity="0.7"/>
-      <stop offset="1" stop-color="#9ff6ff" stop-opacity="0"/>
-    </radialGradient>
-    <!-- glass sheen across the top -->
-    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
-    </linearGradient>
-    <!-- frosted lens behind the fan -->
-    <radialGradient id="lens" cx="0.35" cy="0.3" r="0.8">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.38"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0.08"/>
-    </radialGradient>
-    <linearGradient id="lensRim" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
-      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.15"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0.6"/>
-    </linearGradient>
-    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#dfe9ff"/>
-    </linearGradient>
-    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.7"/>
-      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.1"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0.35"/>
-    </linearGradient>
-    <path id="b" d="M64 64 C59 53 61 39 72 32 C79 27.5 88 30 88.5 36.5 C89 43 80 49 64 64 Z"/>
-    <!-- RGB ring: the keyboard light -->
-    <linearGradient id="ring" x1="0" y1="1" x2="1" y2="0">
-      <stop offset="0" stop-color="#ff6bd6"/>
-      <stop offset="0.5" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#7ff3ff"/>
-    </linearGradient>
+    <path id="b" d="M58.5 51.5 C56 39 62 25 77 18.5 C85 15 92 21 89 29 C85.5 38.5 76 46 69.5 51.5 C66 50 62 50 58.5 51.5 Z"/>
   </defs>
-
-  <!-- squircle body -->
-  <rect x="6" y="6" width="116" height="116" rx="30" fill="url(#bg)"/>
-  <rect x="6" y="6" width="116" height="116" rx="30" fill="url(#glowPink)"/>
-  <rect x="6" y="6" width="116" height="116" rx="30" fill="url(#glowCyan)"/>
-  <!-- top sheen, like light on curved glass -->
-  <path d="M36 6 H92 A30 30 0 0 1 122 36 V44 C96 54 32 54 6 44 V36 A30 30 0 0 1 36 6 Z" fill="url(#sheen)"/>
-  <!-- glass edge -->
-  <rect x="7" y="7" width="114" height="114" rx="29" fill="none" stroke="url(#rim)" stroke-width="2"/>
-
-  <!-- soft shadow of the lens -->
-  <circle cx="64" cy="68" r="36" fill="#1a1350" fill-opacity="0.22"/>
-  <!-- frosted lens -->
-  <circle cx="64" cy="64" r="36" fill="url(#lens)"/>
-  <circle cx="64" cy="64" r="35" fill="none" stroke="url(#lensRim)" stroke-width="1.6"/>
-  <circle cx="64" cy="64" r="39.5" fill="none" stroke="url(#ring)" stroke-width="2.2" stroke-opacity="0.85"/>
-
-  <!-- fan: blade shadows, then blades -->
-  <g fill="#1a1350" fill-opacity="0.2" transform="translate(0 2.5)">
-    <use xlink:href="#b" transform="rotate(0 64 64)"/>
-    <use xlink:href="#b" transform="rotate(72 64 64)"/>
-    <use xlink:href="#b" transform="rotate(144 64 64)"/>
-    <use xlink:href="#b" transform="rotate(216 64 64)"/>
-    <use xlink:href="#b" transform="rotate(288 64 64)"/>
+  <g fill="#000000">
+    <path fill-rule="evenodd" d="M64 4 A60 60 0 1 1 63.99 4 Z M64 11 A53 53 0 1 0 64.01 11 Z"/>
+    <use xlink:href="#b" transform="rotate(0.0 64 64)"/>
+    <use xlink:href="#b" transform="rotate(72.0 64 64)"/>
+    <use xlink:href="#b" transform="rotate(144.0 64 64)"/>
+    <use xlink:href="#b" transform="rotate(216.0 64 64)"/>
+    <use xlink:href="#b" transform="rotate(288.0 64 64)"/>
+    <circle cx="64" cy="64" r="8.5"/>
   </g>
-  <g fill="url(#blade)" fill-opacity="0.97">
-    <use xlink:href="#b" transform="rotate(0 64 64)"/>
-    <use xlink:href="#b" transform="rotate(72 64 64)"/>
-    <use xlink:href="#b" transform="rotate(144 64 64)"/>
-    <use xlink:href="#b" transform="rotate(216 64 64)"/>
-    <use xlink:href="#b" transform="rotate(288 64 64)"/>
-  </g>
-  <!-- hub -->
-  <circle cx="64" cy="64" r="8.5" fill="#ffffff"/>
-  <circle cx="64" cy="64" r="5" fill="url(#bg)"/>
-  <circle cx="62.3" cy="62.2" r="1.6" fill="#ffffff" fill-opacity="0.85"/>
 </svg>
