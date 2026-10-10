@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Gigabyte Control Center
+Comment=Keyboard light, fans and power modes
+Exec=gbcc-gui
+Icon=gigabyte-control-center
+Categories=Settings;HardwareSettings;
+Keywords=fan;keyboard;rgb;backlight;performance;
