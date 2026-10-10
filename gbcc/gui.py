@@ -10,6 +10,7 @@ import sys
 import time
 
 from PySide6.QtCore import QByteArray, QObject, QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtDBus import QDBusConnection, QDBusInterface
 from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
@@ -740,6 +741,23 @@ def forward_to_running_instance(command):
     return True
 
 
+TRAY_WAIT = 30  # seconds to wait for the panel's tray at login
+
+
+def tray_host_ready():
+    """True once a StatusNotifier host (the panel's tray) is registered.
+
+    Qt checks this only once and caches the answer, so at login – when the
+    app may start before the panel – it has to be asked before Qt does.
+    """
+    bus = QDBusConnection.sessionBus()
+    if not bus.interface().isServiceRegistered("org.kde.StatusNotifierWatcher").value():
+        return False
+    watcher = QDBusInterface("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
+                             "org.kde.StatusNotifierWatcher", bus)
+    return bool(watcher.property("IsStatusNotifierHostRegistered"))
+
+
 def main():
     args = sys.argv[1:]
     app = QApplication(sys.argv)
@@ -755,17 +773,39 @@ def main():
     window = MainWindow(backend)
     popup = QuickPopup(backend, window.open)
     tray = None
-    if QSystemTrayIcon.isSystemTrayAvailable():
-        tray = Tray(app, backend, window, popup)
-        tray.show()
-        window.keep_running = True
-        app.setQuitOnLastWindowClosed(False)
+    waiting = command == "tray" and not tray_host_ready()
+
+    def add_tray():
+        nonlocal tray, waiting
+        waiting = False
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            tray = Tray(app, backend, window, popup)
+            tray.show()
+            window.keep_running = True
+            app.setQuitOnLastWindowClosed(False)
 
     def handle(cmd):
         if cmd == "popup":
             popup.toggle()
-        elif cmd == "show" or not tray:
+        elif cmd == "show" or not (tray or waiting):
             window.open()
+
+    if waiting:
+        # Started with the session before the panel: wait for its tray
+        # instead of opening the window. No tray in time → open the window.
+        deadline = time.monotonic() + TRAY_WAIT
+        poll = QTimer()
+
+        def check():
+            if tray_host_ready() or time.monotonic() > deadline:
+                poll.stop()
+                add_tray()
+                handle(command)
+
+        poll.timeout.connect(check)
+        poll.start(500)
+    else:
+        add_tray()
 
     server = QLocalServer()
     QLocalServer.removeServer(instance_name())
